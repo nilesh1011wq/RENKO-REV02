@@ -1,0 +1,6 @@
+{
+  "name": "RenkoDesk",
+  "description": "Capital.com Renko (23h ATR5/5) and Supertrend (1, 2.1) multi-instrument trading workstation with automated mirrored 2-leg Buy/Sell execution and Demo/Live broker integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

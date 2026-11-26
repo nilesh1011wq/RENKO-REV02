@@ -1,0 +1,302 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // PILLAR 1: Default-Deny Catch-All
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isBootstrapAdmin() {
+      return isVerifiedUser()
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'parimandape@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin()
+        || (isVerifiedUser()
+          && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidId(id) {
+      return id is string
+        && id.size() >= 1
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isValidEpicId(epic) {
+      return epic in ['GOLD', 'US100', 'OIL_CRUDE', 'BTCUSD', 'ETHUSD'];
+    }
+
+    function isValidEmail(email) {
+      return email is string
+        && email.size() >= 3
+        && email.size() <= 254
+        && email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    function requiresApproval() {
+      return exists(/databases/$(database)/documents/governance/global)
+        && get(/databases/$(database)/documents/governance/global).data.requireAdminApproval == true;
+    }
+
+    function isActiveTrader(userId) {
+      return isAdmin()
+        || (exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.status == 'active');
+    }
+
+    // ===============================================================
+    // Entity Validators (Called on both create and update)
+    // ===============================================================
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'email', 'displayName', 'photoURL',
+          'role', 'status', 'allowLiveMode',
+          'createdAt', 'updatedAt', 'lastLoginAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL',
+          'role', 'status', 'allowLiveMode',
+          'createdAt', 'updatedAt', 'lastLoginAt'
+        ])
+        && data.uid is string
+        && data.uid == userId
+        && isValidEmail(data.email)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && data.photoURL is string
+        && data.photoURL.size() <= 500
+        && data.role in ['admin', 'trader']
+        && data.status in ['active', 'pending', 'suspended']
+        && data.allowLiveMode is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.lastLoginAt is timestamp;
+    }
+
+    function isValidUserCreate(data, userId) {
+      return isValidUserProfile(data, userId)
+        && data.email.lower() == request.auth.token.email.lower()
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.lastLoginAt == request.time
+        && (
+          (isBootstrapAdmin()
+            && data.role == 'admin'
+            && data.status == 'active'
+            && data.allowLiveMode == true)
+          || (!isBootstrapAdmin()
+            && data.role == 'trader'
+            && data.allowLiveMode == false
+            && (
+              (requiresApproval() && data.status == 'pending')
+              || (!requiresApproval() && data.status == 'active')
+            ))
+        );
+    }
+
+    function isValidAdminRoleDoc(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'grantedBy', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'grantedBy', 'createdAt'])
+        && data.uid is string
+        && data.uid == userId
+        && isValidEmail(data.email)
+        && data.grantedBy is string
+        && data.grantedBy == request.auth.uid
+        && data.createdAt is timestamp
+        && data.createdAt == request.time;
+    }
+
+    function isValidWorkspaceConfig(data, userId, epic) {
+      return data.keys().hasAll([
+          'ownerId', 'epic', 'mode', 'sizingMode',
+          'lot1', 'lot2', 'margin1', 'margin2',
+          'stEnabled', 'stPeriod', 'stMultiplier', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'epic', 'mode', 'sizingMode',
+          'lot1', 'lot2', 'margin1', 'margin2',
+          'stEnabled', 'stPeriod', 'stMultiplier', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.epic is string
+        && data.epic == epic
+        && data.mode in ['AUTO', 'MANUAL']
+        && data.sizingMode in ['LOT', 'MARGIN']
+        && data.lot1 is number && data.lot1 > 0 && data.lot1 <= 10000
+        && data.lot2 is number && data.lot2 > 0 && data.lot2 <= 10000
+        && data.margin1 is number && data.margin1 > 0 && data.margin1 <= 1000000
+        && data.margin2 is number && data.margin2 > 0 && data.margin2 <= 1000000
+        && data.stEnabled is bool
+        && data.stPeriod is number && data.stPeriod >= 1 && data.stPeriod <= 50
+        && data.stMultiplier is number && data.stMultiplier >= 0.1 && data.stMultiplier <= 20
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidGovernance(data) {
+      return data.keys().hasAll([
+          'requireAdminApproval', 'globalAutoTradingEnabled',
+          'allowNonAdminLiveMode', 'maxLotCap', 'announcement',
+          'updatedBy', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'requireAdminApproval', 'globalAutoTradingEnabled',
+          'allowNonAdminLiveMode', 'maxLotCap', 'announcement',
+          'updatedBy', 'updatedAt'
+        ])
+        && data.requireAdminApproval is bool
+        && data.globalAutoTradingEnabled is bool
+        && data.allowNonAdminLiveMode is bool
+        && data.maxLotCap is number && data.maxLotCap > 0 && data.maxLotCap <= 10000
+        && data.announcement is string && data.announcement.size() <= 300
+        && data.updatedBy is string && data.updatedBy == request.auth.uid
+        && data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll([
+          'actorUid', 'actorEmail', 'action', 'targetUid', 'details', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'actorUid', 'actorEmail', 'action', 'targetUid', 'details', 'createdAt'
+        ])
+        && data.actorUid is string && data.actorUid == request.auth.uid
+        && isValidEmail(data.actorEmail) && data.actorEmail.lower() == request.auth.token.email.lower()
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 60
+        && data.targetUid is string && data.targetUid.size() <= 128
+        && data.details is string && data.details.size() >= 1 && data.details.size() <= 400
+        && data.createdAt is timestamp && data.createdAt == request.time;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserCreate(request.resource.data, userId);
+
+      // Owner can only refresh their display profile & login timestamps
+      allow update: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['displayName', 'photoURL', 'lastLoginAt', 'updatedAt'])
+        && isValidUserProfile(request.resource.data, userId)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastLoginAt == request.time;
+
+      // Admin can govern role, approval status, and live-mode permission
+      allow update: if isAdmin()
+        && isValidId(userId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['role', 'status', 'allowLiveMode', 'updatedAt'])
+        && isValidUserProfile(request.resource.data, userId)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && (resource.data.email.lower() != 'parimandape@gmail.com'
+          || (request.resource.data.role == 'admin'
+            && request.resource.data.status == 'active'));
+
+      allow delete: if false;
+    }
+
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(userId)
+        && isValidAdminRoleDoc(request.resource.data, userId);
+
+      allow update: if false;
+
+      allow delete: if isAdmin()
+        && isValidId(userId)
+        && userId != request.auth.uid
+        && resource.data.email.lower() != 'parimandape@gmail.com';
+    }
+
+    match /workspaces/{userId}/configs/{epic} {
+      allow get: if isValidId(userId)
+        && isValidEpicId(epic)
+        && (isOwner(userId) || isAdmin());
+
+      allow list: if isOwner(userId) || isAdmin();
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidEpicId(epic)
+        && (isOwner(userId) || isAdmin())
+        && isActiveTrader(userId)
+        && isValidWorkspaceConfig(request.resource.data, userId, epic);
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidEpicId(epic)
+        && (isOwner(userId) || isAdmin())
+        && isActiveTrader(userId)
+        && isValidWorkspaceConfig(request.resource.data, userId, epic)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.epic == resource.data.epic;
+
+      allow delete: if isAdmin() && isValidId(userId) && isValidEpicId(epic);
+    }
+
+    match /governance/{docId} {
+      allow get: if isSignedIn() && docId == 'global';
+      allow list: if false;
+
+      allow create, update: if isAdmin()
+        && docId == 'global'
+        && isValidGovernance(request.resource.data);
+
+      allow delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(logId)
+        && isValidAuditLog(request.resource.data);
+
+      allow update, delete: if false;
+    }
+  }
+}

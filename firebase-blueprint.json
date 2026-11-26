@@ -1,0 +1,276 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Per-user account profile, RBAC role, approval status, and broker permissions for RenkoDesk.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID matching the document ID."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google account email address."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name shown in the workstation and admin directory."
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Optional avatar URL from Google Sign-In."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "trader"],
+          "description": "Access control role: admin has full governance control; trader has isolated workspace access."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "pending", "suspended"],
+          "description": "Workspace access status controlled by the administrator."
+        },
+        "allowLiveMode": {
+          "type": "boolean",
+          "description": "Whether this user is permitted by the admin to request Live broker mode."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user first registered."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest profile or governance update."
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the user's latest login."
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "photoURL",
+        "role",
+        "status",
+        "allowLiveMode",
+        "createdAt",
+        "updatedAt",
+        "lastLoginAt"
+      ]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Registry of UIDs granted administrator privileges.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Administrator Firebase UID."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Administrator verified email address."
+        },
+        "grantedBy": {
+          "type": "string",
+          "description": "UID of the administrator who granted this role."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when admin privilege was granted."
+        }
+      },
+      "required": ["uid", "email", "grantedBy", "createdAt"]
+    },
+    "WorkspaceConfig": {
+      "title": "WorkspaceConfig",
+      "description": "Isolated per-user Renko and Supertrend configuration for a single instrument epic.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase UID of the workspace owner."
+        },
+        "epic": {
+          "type": "string",
+          "enum": ["GOLD", "US100", "OIL_CRUDE", "BTCUSD", "ETHUSD"],
+          "description": "Instrument epic symbol."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["AUTO", "MANUAL"],
+          "description": "Execution mode for the instrument."
+        },
+        "sizingMode": {
+          "type": "string",
+          "enum": ["LOT", "MARGIN"],
+          "description": "Position sizing method."
+        },
+        "lot1": {
+          "type": "number",
+          "description": "Leg 1 lot size."
+        },
+        "lot2": {
+          "type": "number",
+          "description": "Leg 2 midpoint limit lot size."
+        },
+        "margin1": {
+          "type": "number",
+          "description": "Leg 1 margin allocation."
+        },
+        "margin2": {
+          "type": "number",
+          "description": "Leg 2 margin allocation."
+        },
+        "stEnabled": {
+          "type": "boolean",
+          "description": "Whether Supertrend filter is enabled."
+        },
+        "stPeriod": {
+          "type": "number",
+          "description": "Supertrend ATR period."
+        },
+        "stMultiplier": {
+          "type": "number",
+          "description": "Supertrend ATR multiplier."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest config update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "epic",
+        "mode",
+        "sizingMode",
+        "lot1",
+        "lot2",
+        "margin1",
+        "margin2",
+        "stEnabled",
+        "stPeriod",
+        "stMultiplier",
+        "updatedAt"
+      ]
+    },
+    "GovernancePolicy": {
+      "title": "GovernancePolicy",
+      "description": "Singleton admin-controlled dashboard governance policy.",
+      "type": "object",
+      "properties": {
+        "requireAdminApproval": {
+          "type": "boolean",
+          "description": "When true, new users land in pending status until approved by admin."
+        },
+        "globalAutoTradingEnabled": {
+          "type": "boolean",
+          "description": "Global master switch for automated Renko execution across trader workspaces."
+        },
+        "allowNonAdminLiveMode": {
+          "type": "boolean",
+          "description": "Whether non-admin traders with allowLiveMode=true may request Live mode."
+        },
+        "maxLotCap": {
+          "type": "number",
+          "description": "Maximum allowed lot size cap for non-admin workspaces."
+        },
+        "announcement": {
+          "type": "string",
+          "description": "Optional notice banner displayed across all trader workspaces."
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the administrator who last updated governance."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the latest governance update."
+        }
+      },
+      "required": [
+        "requireAdminApproval",
+        "globalAutoTradingEnabled",
+        "allowNonAdminLiveMode",
+        "maxLotCap",
+        "announcement",
+        "updatedBy",
+        "updatedAt"
+      ]
+    },
+    "AdminAuditLog": {
+      "title": "AdminAuditLog",
+      "description": "Immutable administrative audit log recording user status, role, and governance actions.",
+      "type": "object",
+      "properties": {
+        "actorUid": {
+          "type": "string",
+          "description": "UID of the administrator performing the action."
+        },
+        "actorEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Email of the administrator performing the action."
+        },
+        "action": {
+          "type": "string",
+          "description": "Short action code (e.g. APPROVE_USER, SUSPEND_USER, UPDATE_GOVERNANCE)."
+        },
+        "targetUid": {
+          "type": "string",
+          "description": "Optional target user UID affected by this action."
+        },
+        "details": {
+          "type": "string",
+          "description": "Human-readable audit description."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the audit event."
+        }
+      },
+      "required": [
+        "actorUid",
+        "actorEmail",
+        "action",
+        "targetUid",
+        "details",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private per-user profiles and RBAC state. Readable by owner or admin; listable only by admin."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRole" },
+      "description": "Administrator role registry used by security rules and UI RBAC checks."
+    },
+    "/workspaces/{userId}/configs/{epic}": {
+      "schema": { "$ref": "#/entities/WorkspaceConfig" },
+      "description": "Isolated per-user Renko & Supertrend instrument configuration documents."
+    },
+    "/governance/{docId}": {
+      "schema": { "$ref": "#/entities/GovernancePolicy" },
+      "description": "Singleton global governance policy at /governance/global managed strictly by admin."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AdminAuditLog" },
+      "description": "Immutable admin audit log readable and creatable strictly by administrators."
+    }
+  }
+}
