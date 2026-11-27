@@ -137,9 +137,9 @@ export function WatchlistGrid({
               {/* Right quote block */}
               <div className="flex flex-col items-end shrink-0">
                 <div className="flex items-center gap-2.5 text-[11px] font-mono text-slate-500 tabular-nums mb-1.5">
-                  <span>H: {formatPrice(mkt.high24h, decimals)}</span>
-                  <span>S: {formatPrice(mkt.spread, decimals)}</span>
-                  <span>L: {formatPrice(mkt.low24h, decimals)}</span>
+                  <span title="24h High">H: {formatPrice(mkt.high24h, decimals)}</span>
+                  <span title="Live Spread (BUY − SELL)">S: {formatPrice(mkt.spread, decimals)}</span>
+                  <span title="24h Low">L: {formatPrice(mkt.low24h, decimals)}</span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -191,7 +191,18 @@ export function WatchlistGrid({
                 </div>
 
                 <div className="mt-1.5 flex items-center gap-3 text-[11px] font-mono text-slate-500 tabular-nums">
-                  <span>Brick (23h): {formatPrice(mkt.brickSize, decimals)}</span>
+                  <span
+                    tabIndex={0}
+                    className="group relative inline-flex items-center cursor-help underline decoration-dotted decoration-slate-300 underline-offset-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-slate-400 rounded-xs"
+                  >
+                    <span>Brick (23h): {formatPrice(mkt.brickSize, decimals)}</span>
+                    <span
+                      role="tooltip"
+                      className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity duration-150 absolute bottom-full right-0 mb-2 z-30 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1.5 text-[11px] font-mono font-medium text-white shadow-lg border border-slate-700"
+                    >
+                      23h ATR(5): {formatPrice(mkt.atr5, decimals)} ÷ 5
+                    </span>
+                  </span>
                   <span aria-hidden="true">·</span>
                   <span>{cfg.leverage}x Real</span>
                 </div>

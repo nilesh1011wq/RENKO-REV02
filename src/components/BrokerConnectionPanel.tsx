@@ -192,10 +192,10 @@ export function BrokerConnectionPanel({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs leading-relaxed">
           <div>
             <h3 className="font-display font-semibold text-slate-900 mb-1.5">
-              01. Renko (23h ATR5/5) Bricks
+              01. Zero-Aligned Renko (23h ATR5/5)
             </h3>
             <p className="text-slate-600">
-              Brick height dynamically updates from the 5-period daily/23h ATR divided by 5. Standard 2-brick reversal logic requires a full 2× brick move from the extreme close to form an opposite brick.
+              Live 1-hour candles are grouped into rolling 23-hour OHLC blocks to compute 23h ATR(5) ÷ 5. Every Renko brick locks onto an exact integer multiple of Brick Size (k × Brick) with standard 2-brick reversal logic and zero drift.
             </p>
           </div>
 
@@ -210,10 +210,10 @@ export function BrokerConnectionPanel({
 
           <div>
             <h3 className="font-display font-semibold text-slate-900 mb-1.5">
-              03. Mirrored Buy &amp; Sell 2-Leg Orders
+              03. Mirrored 2-Leg Orders &amp; Anti-Stacking Lock
             </h3>
             <p className="text-slate-600">
-              Leg 1 places a LIMIT at signal brick close with a 5-brick Take Profit and no Stop Loss (falling back to MARKET on broker LIMIT rejection). Leg 2 places a LIMIT at the signal brick midpoint (Close ∓ 0.5× Brick) with no TP/SL, held until trend flip.
+              Leg 1 places a LIMIT at signal brick close (5-brick TP, no SL, MARKET fallback on rejection); Leg 2 places a LIMIT at brick midpoint (Close ∓ 0.5× Brick, no TP/SL). Filled broker positions reconcile back to their signal lock once per trend to prevent duplicate stacking.
             </p>
           </div>
         </div>

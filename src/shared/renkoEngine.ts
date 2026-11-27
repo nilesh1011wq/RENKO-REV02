@@ -12,22 +12,67 @@ export function roundPrice(value: number, decimals: number): number {
 }
 
 /**
- * Computes dynamic brick size from 23h/daily OHLC candles using ATR(5) / 5.
- * Matches the observed Renko (23h ATR5/5) specification across all five assets.
+ * Groups chronologically ordered 1-hour OHLC candles backwards from the latest
+ * candle into contiguous 23-hour synthetic OHLC blocks (oldest -> newest).
+ * With 160 hourly candles, yields 6 complete 23-hour blocks -> 5 True Ranges for ATR(5).
  */
-export function calculate23hAtr5Div5(
-  dailyCandles: OhlcCandle[],
+export function aggregate23hBlocks(
+  hourlyCandles: OhlcCandle[],
+  blockHours = 23,
+): OhlcCandle[] {
+  if (hourlyCandles.length < blockHours) {
+    return [];
+  }
+
+  const sorted = [...hourlyCandles].sort(
+    (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
+  );
+
+  const blocksReversed: OhlcCandle[] = [];
+  for (let end = sorted.length; end >= blockHours; end -= blockHours) {
+    const slice = sorted.slice(end - blockHours, end);
+    const open = slice[0].open;
+    const close = slice[slice.length - 1].close;
+    let high = -Infinity;
+    let low = Infinity;
+    for (const c of slice) {
+      if (c.high > high) high = c.high;
+      if (c.low < low) low = c.low;
+    }
+    blocksReversed.push({
+      timestamp: slice[slice.length - 1].timestamp,
+      open,
+      high,
+      low,
+      close,
+    });
+  }
+
+  return blocksReversed.reverse();
+}
+
+/**
+ * Computes both 23h ATR(5) and dynamic brick size (ATR(5) / 5) from 23h or daily OHLC bars.
+ */
+export function calculate23hAtr5WithBrick(
+  bars: OhlcCandle[],
   decimals: number,
   fallbackBrickSize: number,
-): number {
-  if (dailyCandles.length < 2) {
-    return fallbackBrickSize;
+  fallbackAtr5?: number,
+): { atr5: number; brickSize: number } {
+  const safeFallbackAtr5 = roundPrice(
+    fallbackAtr5 ?? fallbackBrickSize * 5,
+    decimals,
+  );
+
+  if (bars.length < 2) {
+    return { atr5: safeFallbackAtr5, brickSize: fallbackBrickSize };
   }
 
   const trueRanges: number[] = [];
-  for (let i = 1; i < dailyCandles.length; i += 1) {
-    const curr = dailyCandles[i];
-    const prevClose = dailyCandles[i - 1].close;
+  for (let i = 1; i < bars.length; i += 1) {
+    const curr = bars[i];
+    const prevClose = bars[i - 1].close;
     const tr = Math.max(
       curr.high - curr.low,
       Math.abs(curr.high - prevClose),
@@ -39,25 +84,43 @@ export function calculate23hAtr5Div5(
   }
 
   if (trueRanges.length === 0) {
-    return fallbackBrickSize;
+    return { atr5: safeFallbackAtr5, brickSize: fallbackBrickSize };
   }
 
   const window = trueRanges.slice(-5);
-  const atr5 = window.reduce((sum, val) => sum + val, 0) / window.length;
-  const rawBrick = atr5 / 5;
+  const rawAtr5 = window.reduce((sum, val) => sum + val, 0) / window.length;
+  const rawBrick = rawAtr5 / 5;
 
   if (!Number.isFinite(rawBrick) || rawBrick <= 0) {
-    return fallbackBrickSize;
+    return { atr5: safeFallbackAtr5, brickSize: fallbackBrickSize };
   }
 
-  const rounded = roundPrice(rawBrick, decimals);
-  return rounded > 0 ? rounded : fallbackBrickSize;
+  const atr5 = roundPrice(rawAtr5, decimals);
+  const brickSize = roundPrice(rawBrick, decimals);
+  return brickSize > 0
+    ? { atr5, brickSize }
+    : { atr5: safeFallbackAtr5, brickSize: fallbackBrickSize };
 }
 
 /**
- * Standard 2-brick reversal Renko builder (no wicks, uniform brick height).
- * - Continuation: opens at prior brick close, moves +/- 1 * brickSize.
- * - Reversal: requires +/- 2 * brickSize from prior brick close; opens at prior brick open.
+ * Computes dynamic brick size from 23h/daily OHLC candles using ATR(5) / 5.
+ * Matches the observed Renko (23h ATR5/5) specification across all five assets.
+ */
+export function calculate23hAtr5Div5(
+  dailyCandles: OhlcCandle[],
+  decimals: number,
+  fallbackBrickSize: number,
+): number {
+  return calculate23hAtr5WithBrick(dailyCandles, decimals, fallbackBrickSize)
+    .brickSize;
+}
+
+/**
+ * Zero-aligned standard 2-brick reversal Renko builder (no wicks, uniform brick height).
+ * Every brick open & close sits strictly on an exact integer multiple of brickSize (k * B):
+ * - Initial grid anchor: floor(candles[0].close / B) * B
+ * - Continuation: opens at prior brick close (k * B), moves +/- 1 * B.
+ * - Reversal: requires +/- 2 * B from prior brick close; opens at prior brick open.
  */
 export function buildRenkoBricks(
   candles: OhlcCandle[],
@@ -68,50 +131,69 @@ export function buildRenkoBricks(
     return [];
   }
 
+  const levelAt = (gridIdx: number): number =>
+    roundPrice(gridIdx * brickSize, decimals);
+  const eps = 1e-9;
+
   const bricks: RenkoBrick[] = [];
-  let anchor = roundPrice(candles[0].close, decimals);
+  let anchorIdx = Math.floor(candles[0].close / brickSize + eps);
   let lastDir: 'UP' | 'DOWN' | null = null;
-  let lastOpen = anchor;
-  let lastClose = anchor;
+  let lastOpenIdx = anchorIdx;
+  let lastCloseIdx = anchorIdx;
 
   for (let i = 1; i < candles.length; i += 1) {
     const price = candles[i].close;
     const ts = candles[i].timestamp;
 
     if (lastDir === null) {
-      const diff = price - anchor;
-      if (Math.abs(diff) >= brickSize) {
-        const count = Math.floor(Math.abs(diff) / brickSize);
-        const dir: 'UP' | 'DOWN' = diff > 0 ? 'UP' : 'DOWN';
-        for (let k = 0; k < count; k += 1) {
-          const open = roundPrice(anchor, decimals);
-          const close = roundPrice(
-            dir === 'UP' ? open + brickSize : open - brickSize,
-            decimals,
-          );
+      const upTarget = levelAt(anchorIdx + 1);
+      const downTarget = levelAt(anchorIdx - 1);
+
+      if (price >= upTarget - eps) {
+        while (price >= levelAt(anchorIdx + 1) - eps) {
+          const open = levelAt(anchorIdx);
+          const close = levelAt(anchorIdx + 1);
           bricks.push({
             index: bricks.length,
             open,
             close,
-            high: Math.max(open, close),
-            low: Math.min(open, close),
-            direction: dir,
+            high: close,
+            low: open,
+            direction: 'UP',
             timestamp: ts,
           });
-          anchor = close;
-          lastOpen = open;
-          lastClose = close;
-          lastDir = dir;
+          lastOpenIdx = anchorIdx;
+          lastCloseIdx = anchorIdx + 1;
+          anchorIdx += 1;
+          lastDir = 'UP';
+        }
+      } else if (price <= downTarget + eps) {
+        while (price <= levelAt(anchorIdx - 1) + eps) {
+          const open = levelAt(anchorIdx);
+          const close = levelAt(anchorIdx - 1);
+          bricks.push({
+            index: bricks.length,
+            open,
+            close,
+            high: open,
+            low: close,
+            direction: 'DOWN',
+            timestamp: ts,
+          });
+          lastOpenIdx = anchorIdx;
+          lastCloseIdx = anchorIdx - 1;
+          anchorIdx -= 1;
+          lastDir = 'DOWN';
         }
       }
       continue;
     }
 
     if (lastDir === 'UP') {
-      // Continuation UP (+1 brick from lastClose)
-      while (price >= lastClose + brickSize - 1e-9) {
-        const open = roundPrice(lastClose, decimals);
-        const close = roundPrice(open + brickSize, decimals);
+      // Continuation UP (+1 brick from lastCloseIdx)
+      while (price >= levelAt(lastCloseIdx + 1) - eps) {
+        const open = levelAt(lastCloseIdx);
+        const close = levelAt(lastCloseIdx + 1);
         bricks.push({
           index: bricks.length,
           open,
@@ -121,35 +203,36 @@ export function buildRenkoBricks(
           direction: 'UP',
           timestamp: ts,
         });
-        lastOpen = open;
-        lastClose = close;
+        lastOpenIdx = lastCloseIdx;
+        lastCloseIdx += 1;
       }
 
-      // Reversal DOWN (-2 bricks from lastClose, opens at lastOpen)
-      if (price <= lastOpen - brickSize + 1e-9) {
-        let revOpen = roundPrice(lastOpen, decimals);
-        while (price <= revOpen - brickSize + 1e-9) {
-          const close = roundPrice(revOpen - brickSize, decimals);
+      // Reversal DOWN (-2 bricks from lastCloseIdx, opens at lastOpenIdx)
+      if (price <= levelAt(lastOpenIdx - 1) + eps) {
+        let revOpenIdx = lastOpenIdx;
+        while (price <= levelAt(revOpenIdx - 1) + eps) {
+          const open = levelAt(revOpenIdx);
+          const close = levelAt(revOpenIdx - 1);
           bricks.push({
             index: bricks.length,
-            open: revOpen,
+            open,
             close,
-            high: revOpen,
+            high: open,
             low: close,
             direction: 'DOWN',
             timestamp: ts,
           });
-          lastOpen = revOpen;
-          lastClose = close;
+          lastOpenIdx = revOpenIdx;
+          lastCloseIdx = revOpenIdx - 1;
           lastDir = 'DOWN';
-          revOpen = close;
+          revOpenIdx = lastCloseIdx;
         }
       }
     } else {
-      // Continuation DOWN (-1 brick from lastClose)
-      while (price <= lastClose - brickSize + 1e-9) {
-        const open = roundPrice(lastClose, decimals);
-        const close = roundPrice(open - brickSize, decimals);
+      // Continuation DOWN (-1 brick from lastCloseIdx)
+      while (price <= levelAt(lastCloseIdx - 1) + eps) {
+        const open = levelAt(lastCloseIdx);
+        const close = levelAt(lastCloseIdx - 1);
         bricks.push({
           index: bricks.length,
           open,
@@ -159,28 +242,29 @@ export function buildRenkoBricks(
           direction: 'DOWN',
           timestamp: ts,
         });
-        lastOpen = open;
-        lastClose = close;
+        lastOpenIdx = lastCloseIdx;
+        lastCloseIdx -= 1;
       }
 
-      // Reversal UP (+2 bricks from lastClose, opens at lastOpen)
-      if (price >= lastOpen + brickSize - 1e-9) {
-        let revOpen = roundPrice(lastOpen, decimals);
-        while (price >= revOpen + brickSize - 1e-9) {
-          const close = roundPrice(revOpen + brickSize, decimals);
+      // Reversal UP (+2 bricks from lastCloseIdx, opens at lastOpenIdx)
+      if (price >= levelAt(lastOpenIdx + 1) - eps) {
+        let revOpenIdx = lastOpenIdx;
+        while (price >= levelAt(revOpenIdx + 1) - eps) {
+          const open = levelAt(revOpenIdx);
+          const close = levelAt(revOpenIdx + 1);
           bricks.push({
             index: bricks.length,
-            open: revOpen,
+            open,
             close,
             high: close,
-            low: revOpen,
+            low: open,
             direction: 'UP',
             timestamp: ts,
           });
-          lastOpen = revOpen;
-          lastClose = close;
+          lastOpenIdx = revOpenIdx;
+          lastCloseIdx = revOpenIdx + 1;
           lastDir = 'UP';
-          revOpen = close;
+          revOpenIdx = lastCloseIdx;
         }
       }
     }

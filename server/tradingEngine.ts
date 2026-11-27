@@ -1,6 +1,7 @@
 import {
+  aggregate23hBlocks,
   buildRenkoBricks,
-  calculate23hAtr5Div5,
+  calculate23hAtr5WithBrick,
   calculateSupertrend,
   calculateTwoLegOrders,
   countConsecutiveBricks,
@@ -132,6 +133,7 @@ const DEFAULT_CONFIGS: Record<EpicSymbol, InstrumentConfig> = {
 
 interface SimAssetSeed {
   baseBrick: number;
+  baseAtr5: number;
   startPrice: number;
   spread: number;
   // Sequence of brick steps (+1 = UP, -1 = DOWN) to construct faithful starting charts
@@ -141,56 +143,61 @@ interface SimAssetSeed {
 
 const SIM_SEEDS: Record<EpicSymbol, SimAssetSeed> = {
   GOLD: {
-    baseBrick: 29.99,
-    startPrice: 3718.76,
-    spread: 0.5,
+    baseBrick: 24.54,
+    baseAtr5: 122.69,
+    startPrice: 3705.54, // 151 * 24.54 -> ends at 147 * 24.54 = 3607.38
+    spread: 0.75,
     // 1 UP, 7 DOWN, 5 UP, 7 DOWN, 4 UP (exact structure from reference charts)
     brickPattern: [
       1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
       1, 1, 1, 1,
     ],
-    liveOffset: -26.0,
+    liveOffset: -10.5,
   },
   US100: {
-    baseBrick: 274.5,
-    startPrice: 27450.0,
+    baseBrick: 231.4,
+    baseAtr5: 1156.8,
+    startPrice: 27768.0, // 120 * 231.4 -> ends at 115 * 231.4 = 26611.0
     spread: 1.8,
     // 1 UP, 8 DOWN, 5 UP, 5 DOWN, 2 UP
     brickPattern: [
       1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, 1,
       1,
     ],
-    liveOffset: 84.5,
+    liveOffset: -64.0,
   },
   OIL_CRUDE: {
-    baseBrick: 0.72,
-    startPrice: 82.08,
+    baseBrick: 0.69,
+    baseAtr5: 3.46,
+    startPrice: 82.8, // 120 * 0.69 -> ends at 123 * 0.69 = 84.87
     spread: 0.04,
     // 2 UP, 2 DOWN, 2 UP, 5 DOWN, 6 UP
     brickPattern: [1, 1, -1, -1, 1, 1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1],
-    liveOffset: -0.39,
+    liveOffset: -0.25,
   },
   BTCUSD: {
-    baseBrick: 649.11,
-    startPrice: 59069.01,
+    baseBrick: 640.25,
+    baseAtr5: 3201.27,
+    startPrice: 58903.0, // 92 * 640.25 -> ends at 95 * 640.25 = 60823.75
     spread: 50.0,
     // 4 DOWN, 6 UP, 1 DOWN pullback (ST stays green!), 6 UP, 8 DOWN, 3 UP
     brickPattern: [
       -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1,
       -1, -1, -1, -1, 1, 1, 1,
     ],
-    liveOffset: 59.34,
+    liveOffset: 112.5,
   },
   ETHUSD: {
-    baseBrick: 19.84,
-    startPrice: 1626.88,
+    baseBrick: 20.51,
+    baseAtr5: 102.55,
+    startPrice: 1661.31, // 81 * 20.51 -> ends at 84 * 20.51 = 1722.84
     spread: 1.75,
     // 3 DOWN, 6 UP, 1 DOWN pullback (ST stays green!), 7 UP, 9 DOWN, 2 UP
     brickPattern: [
       -1, -1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
       -1, -1, -1, -1, 1, 1,
     ],
-    liveOffset: -0.35,
+    liveOffset: -5.4,
   },
 };
 
@@ -270,6 +277,7 @@ export class TradingEngine {
   private closedTrades: ClosedTradeRecord[] = [];
   private signalLocks: Record<EpicSymbol, SignalLockState | null>;
   private previousTrends: Record<EpicSymbol, TrendDirection>;
+  private hasInitializedLiveTrends: Record<EpicSymbol, boolean>;
   private simBalance = 12500.0;
   private lastSyncAt = new Date().toISOString();
   private errorMessage: string | null = null;
@@ -324,6 +332,13 @@ export class TradingEngine {
       OIL_CRUDE: 'BULLISH',
       BTCUSD: 'BULLISH',
       ETHUSD: 'BULLISH',
+    };
+    this.hasInitializedLiveTrends = {
+      GOLD: false,
+      US100: false,
+      OIL_CRUDE: false,
+      BTCUSD: false,
+      ETHUSD: false,
     };
 
     for (const epic of EPIC_LIST) {
@@ -388,13 +403,21 @@ export class TradingEngine {
     return this.allowBrokerSecrets && this.capital.isConfigured(this.environment);
   }
 
+  private getLotCeiling(config: InstrumentConfig): number {
+    return this.isAdminWorkspace
+      ? 10000
+      : Math.max(config.minSize, this.maxLotCap);
+  }
+
   private getEffectiveSize(
     config: InstrumentConfig,
     leg: 1 | 2,
     price: number,
   ): number {
+    const lotCeiling = this.getLotCeiling(config);
     if (config.sizingMode === 'LOT') {
-      return leg === 1 ? config.lot1 : config.lot2;
+      const configured = leg === 1 ? config.lot1 : config.lot2;
+      return roundPrice(Math.min(Math.max(config.minSize, configured), lotCeiling), 4);
     }
     const targetMargin = leg === 1 ? config.margin1 : config.margin2;
     if (price <= 0) return config.minSize;
@@ -403,7 +426,7 @@ export class TradingEngine {
       config.minSize,
       Math.round(rawSize / config.sizeStep) * config.sizeStep,
     );
-    return roundPrice(stepped, 4);
+    return roundPrice(Math.min(stepped, lotCeiling), 4);
   }
 
   private calcMargin(size: number, price: number, leverage: number): number {
@@ -458,7 +481,7 @@ export class TradingEngine {
         pnl,
         margin: this.calcMargin(leg1Size, entry, config.leverage),
         leverage: config.leverage,
-        source: isBtcFallback ? 'AUTO' : 'CHART_EXT',
+        source: 'AUTO',
         legLabel: 'LEG 1',
         openedAt: ts,
       });
@@ -523,15 +546,25 @@ export class TradingEngine {
         leg1OrderType: isBtcFallback ? 'MARKET' : 'LIMIT',
         leg1Filled: true,
         leg2Filled: false,
+        leg1Level,
+        leg1Tp,
+        leg2Level,
       };
     }
 
     // Also add one filled LEG2 position on OIL_CRUDE to mirror the multi-leg view
     const oilMarket = this.markets.OIL_CRUDE;
     const oilCfg = this.configs.OIL_CRUDE;
-    const oilEntry = roundPrice(oilMarket.mid - oilMarket.brickSize * 1.15, oilCfg.decimals);
+    const oilLock = this.signalLocks.OIL_CRUDE;
+    const oilEntry =
+      oilLock?.leg2Level ??
+      roundPrice(oilMarket.mid - oilMarket.brickSize * 0.5, oilCfg.decimals);
+    const oilLeg2PosId = uid('pos-oil-l2');
+    this.orders = this.orders.filter(
+      (o) => !(o.epic === 'OIL_CRUDE' && o.legLabel === 'LEG 2'),
+    );
     this.positions.unshift({
-      dealId: uid('pos-oil-l2'),
+      dealId: oilLeg2PosId,
       epic: 'OIL_CRUDE',
       direction: 'BUY',
       size: oilCfg.lot2,
@@ -542,10 +575,14 @@ export class TradingEngine {
       pnl: roundPrice((oilMarket.bid - oilEntry) * oilCfg.lot2, 2),
       margin: this.calcMargin(oilCfg.lot2, oilEntry, oilCfg.leverage),
       leverage: oilCfg.leverage,
-      source: 'CHART_EXT',
+      source: 'AUTO',
       legLabel: 'LEG 2',
       openedAt: new Date(now - 95 * 60 * 1000).toISOString(),
     });
+    if (oilLock) {
+      oilLock.leg2DealId = oilLeg2PosId;
+      oilLock.leg2Filled = true;
+    }
   }
 
   private rebuildSimMarket(epic: EpicSymbol): void {
@@ -596,6 +633,7 @@ export class TradingEngine {
       low24h,
       change,
       changePct,
+      atr5: seed.baseAtr5,
       brickSize,
       bricks,
       supertrend,
@@ -673,7 +711,7 @@ export class TradingEngine {
           pnl: 0,
           margin: this.calcMargin(ord.size, fillPrice, cfg.leverage),
           leverage: cfg.leverage,
-          source: ord.source === 'AUTO' ? 'CHART_EXT' : ord.source,
+          source: ord.source,
           legLabel: ord.legLabel,
           openedAt: new Date().toISOString(),
         });
@@ -1020,6 +1058,9 @@ export class TradingEngine {
       leg1OrderType,
       leg1Filled,
       leg2Filled: false,
+      leg1Level,
+      leg1Tp,
+      leg2Level,
     };
 
     this.signalLocks[epic] = lock;
@@ -1048,21 +1089,57 @@ export class TradingEngine {
       this.cachedLiveAccount = acct;
       this.errorMessage = null;
 
-      // Update positions & working orders from broker
+      // Reconcile Capital.com open positions & working limits back to active SignalLocks.
+      // When Capital.com fills a working LIMIT order, it spawns a position with a new dealId;
+      // matching by direction + TP/entry tolerance preserves AUTO ownership and prevents
+      // false USER_CLOSED_AUTO unlocks or duplicate stacking.
+      const matchedLeg1ByEpic = new Set<EpicSymbol>();
+      const matchedLeg2ByEpic = new Set<EpicSymbol>();
+
       this.positions = rawPositions
         .filter((p) => EPIC_LIST.includes(p.epic as EpicSymbol))
         .map((p) => {
           const epic = p.epic as EpicSymbol;
           const cfg = this.configs[epic];
           const lock = this.signalLocks[epic];
-          const legLabel: 'LEG 1' | 'LEG 2' | 'MANUAL' =
-            lock?.leg1DealId === p.dealId
-              ? 'LEG 1'
-              : lock?.leg2DealId === p.dealId
-                ? 'LEG 2'
-                : p.profitLevel !== null
-                  ? 'LEG 1'
-                  : 'LEG 2';
+          let source: 'AUTO' | 'MANUAL' | 'CHART_EXT' = 'CHART_EXT';
+          let legLabel: 'LEG 1' | 'LEG 2' | 'MANUAL' =
+            p.profitLevel !== null ? 'LEG 1' : 'LEG 2';
+
+          if (lock && p.direction === lock.direction) {
+            const tol = Math.max(lock.brickSize * 0.4, cfg.sizeStep);
+            const isExactLeg1 = lock.leg1DealId === p.dealId;
+            const isExactLeg2 = lock.leg2DealId === p.dealId;
+
+            const matchesLeg1ByPrice =
+              !matchedLeg1ByEpic.has(epic) &&
+              p.profitLevel !== null &&
+              ((lock.leg1Tp !== undefined &&
+                Math.abs(p.profitLevel - lock.leg1Tp) <= tol) ||
+                (lock.leg1Level !== undefined &&
+                  Math.abs(p.level - lock.leg1Level) <= tol));
+
+            const matchesLeg2ByPrice =
+              !matchedLeg2ByEpic.has(epic) &&
+              p.profitLevel === null &&
+              lock.leg2Level !== undefined &&
+              Math.abs(p.level - lock.leg2Level) <= tol;
+
+            if (isExactLeg1 || matchesLeg1ByPrice) {
+              matchedLeg1ByEpic.add(epic);
+              lock.leg1DealId = p.dealId;
+              lock.leg1Filled = true;
+              source = 'AUTO';
+              legLabel = 'LEG 1';
+            } else if (isExactLeg2 || matchesLeg2ByPrice) {
+              matchedLeg2ByEpic.add(epic);
+              lock.leg2DealId = p.dealId;
+              lock.leg2Filled = true;
+              source = 'AUTO';
+              legLabel = 'LEG 2';
+            }
+          }
+
           return {
             dealId: p.dealId,
             epic,
@@ -1075,9 +1152,7 @@ export class TradingEngine {
             pnl: p.upl,
             margin: this.calcMargin(p.size, p.level, cfg.leverage),
             leverage: cfg.leverage,
-            source: lock?.leg1DealId === p.dealId && lock.leg1OrderType === 'MARKET'
-              ? 'AUTO'
-              : 'CHART_EXT',
+            source,
             legLabel,
             openedAt: p.createdDateUTC,
           };
@@ -1087,7 +1162,36 @@ export class TradingEngine {
         .filter((o) => EPIC_LIST.includes(o.epic as EpicSymbol))
         .map((o) => {
           const epic = o.epic as EpicSymbol;
+          const cfg = this.configs[epic];
           const lock = this.signalLocks[epic];
+          let source: 'AUTO' | 'MANUAL' | 'CHART_EXT' = 'CHART_EXT';
+          let legLabel: 'LEG 1' | 'LEG 2' =
+            o.profitLevel !== null ? 'LEG 1' : 'LEG 2';
+
+          if (lock && o.direction === lock.direction) {
+            const tol = Math.max(lock.brickSize * 0.4, cfg.sizeStep);
+            const isLeg1 =
+              lock.leg1DealId === o.dealId ||
+              (o.profitLevel !== null &&
+                lock.leg1Level !== undefined &&
+                Math.abs(o.orderLevel - lock.leg1Level) <= tol);
+            const isLeg2 =
+              lock.leg2DealId === o.dealId ||
+              (o.profitLevel === null &&
+                lock.leg2Level !== undefined &&
+                Math.abs(o.orderLevel - lock.leg2Level) <= tol);
+
+            if (isLeg1) {
+              lock.leg1DealId = o.dealId;
+              source = 'AUTO';
+              legLabel = 'LEG 1';
+            } else if (isLeg2) {
+              lock.leg2DealId = o.dealId;
+              source = 'AUTO';
+              legLabel = 'LEG 2';
+            }
+          }
+
           return {
             dealId: o.dealId,
             epic,
@@ -1097,81 +1201,116 @@ export class TradingEngine {
             size: o.size,
             tpLevel: o.profitLevel,
             slLevel: o.stopLevel,
-            source:
-              lock?.leg1DealId === o.dealId || lock?.leg2DealId === o.dealId
-                ? 'AUTO'
-                : 'CHART_EXT',
-            legLabel:
-              lock?.leg1DealId === o.dealId
-                ? 'LEG 1'
-                : lock?.leg2DealId === o.dealId
-                  ? 'LEG 2'
-                  : o.profitLevel !== null
-                    ? 'LEG 1'
-                    : 'LEG 2',
+            source,
+            legLabel,
             createdAt: o.createdDateUTC,
           };
         });
 
-      // Fetch candles and compute 23h ATR5/5 Renko + Supertrend(1, 2.1) for each instrument
+      // Fetch rolling 23h blocks (from 1h candles) and 15m candles to compute zero-aligned Renko + Supertrend(1, 2.1)
+      const epicErrors: string[] = [];
       for (const epic of EPIC_LIST) {
-        const cfg = this.configs[epic];
-        const quote = quotes[epic];
-        const [dailyCandles, m15Candles] = await Promise.all([
-          this.capital.getPrices(this.environment, epic, 'DAY', 10),
-          this.capital.getPrices(this.environment, epic, 'MINUTE_15', 220),
-        ]);
+        try {
+          const cfg = this.configs[epic];
+          const quote = quotes[epic];
+          const [hourlyCandles, m15Candles] = await Promise.all([
+            this.capital.getPrices(this.environment, epic, 'HOUR', 160),
+            this.capital.getPrices(this.environment, epic, 'MINUTE_15', 220),
+          ]);
 
-        const fallbackBrick = SIM_SEEDS[epic].baseBrick;
-        const brickSize = calculate23hAtr5Div5(
-          dailyCandles,
-          cfg.decimals,
-          fallbackBrick,
-        );
-        const bricks = buildRenkoBricks(m15Candles, brickSize, cfg.decimals);
-        const supertrend = calculateSupertrend(
-          bricks,
-          cfg.stPeriod,
-          cfg.stMultiplier,
-          cfg.decimals,
-        );
+          const fallbackBrick = SIM_SEEDS[epic].baseBrick;
+          const fallbackAtr5 = SIM_SEEDS[epic].baseAtr5;
+          const blocks23h = aggregate23hBlocks(hourlyCandles, 23);
 
-        const bid = quote?.bid ?? m15Candles[m15Candles.length - 1]?.close ?? 0;
-        const ask = quote?.offer ?? bid;
-        const mid = roundPrice((bid + ask) / 2, cfg.decimals);
-        const spread = roundPrice(Math.max(0, ask - bid), cfg.decimals);
-        const lastBrick = bricks[bricks.length - 1];
-        const lastSt = supertrend[supertrend.length - 1];
-        const newTrend: TrendDirection = lastSt?.trend || 'BULLISH';
+          let atr5 = fallbackAtr5;
+          let brickSize = fallbackBrick;
+          if (blocks23h.length >= 2) {
+            const computed = calculate23hAtr5WithBrick(
+              blocks23h,
+              cfg.decimals,
+              fallbackBrick,
+              fallbackAtr5,
+            );
+            atr5 = computed.atr5;
+            brickSize = computed.brickSize;
+          } else {
+            const dailyCandles = await this.capital.getPrices(
+              this.environment,
+              epic,
+              'DAY',
+              10,
+            );
+            const computed = calculate23hAtr5WithBrick(
+              dailyCandles,
+              cfg.decimals,
+              fallbackBrick,
+              fallbackAtr5,
+            );
+            atr5 = computed.atr5;
+            brickSize = computed.brickSize;
+          }
 
-        const prevTrend = this.previousTrends[epic];
-        const flipped = prevTrend !== newTrend;
-        this.previousTrends[epic] = newTrend;
+          const bricks = buildRenkoBricks(m15Candles, brickSize, cfg.decimals);
+          const supertrend = calculateSupertrend(
+            bricks,
+            cfg.stPeriod,
+            cfg.stMultiplier,
+            cfg.decimals,
+          );
 
-        this.markets[epic] = {
-          epic,
-          bid,
-          ask,
-          mid,
-          spread,
-          high24h: quote?.high ?? mid,
-          low24h: quote?.low ?? mid,
-          change: quote?.netChange ?? 0,
-          changePct: quote?.percentageChange ?? 0,
-          brickSize,
-          bricks,
-          supertrend,
-          currentTrend: newTrend,
-          consecutiveBricks: countConsecutiveBricks(bricks),
-          lastBrickClose: lastBrick?.close ?? mid,
-          lastStValue: lastSt?.value ?? mid,
-          signalLock: this.signalLocks[epic],
-          lastEvaluatedAt: new Date().toISOString(),
-        };
+          const bid = quote?.bid ?? m15Candles[m15Candles.length - 1]?.close ?? 0;
+          const ask = quote?.offer ?? bid;
+          const mid = roundPrice((bid + ask) / 2, cfg.decimals);
+          const spread = roundPrice(Math.max(0, ask - bid), cfg.decimals);
+          const lastBrick = bricks[bricks.length - 1];
+          const lastSt = supertrend[supertrend.length - 1];
+          const newTrend: TrendDirection = lastSt?.trend || 'BULLISH';
 
-        await this.evaluateLiveStrategyForEpic(epic, flipped, prevTrend, newTrend);
+          const initialized = this.hasInitializedLiveTrends[epic];
+          if (!initialized) {
+            // Anchor first live sync cleanly without triggering a false flip from sandbox seed state
+            this.previousTrends[epic] = newTrend;
+            this.signalLocks[epic] = null;
+            this.hasInitializedLiveTrends[epic] = true;
+          }
+
+          const prevTrend = this.previousTrends[epic];
+          const flipped = initialized && prevTrend !== newTrend;
+          this.previousTrends[epic] = newTrend;
+
+          this.markets[epic] = {
+            epic,
+            bid,
+            ask,
+            mid,
+            spread,
+            high24h: quote?.high ?? mid,
+            low24h: quote?.low ?? mid,
+            change: quote?.netChange ?? 0,
+            changePct: quote?.percentageChange ?? 0,
+            atr5,
+            brickSize,
+            bricks,
+            supertrend,
+            currentTrend: newTrend,
+            consecutiveBricks: countConsecutiveBricks(bricks),
+            lastBrickClose: lastBrick?.close ?? mid,
+            lastStValue: lastSt?.value ?? mid,
+            signalLock: this.signalLocks[epic],
+            lastEvaluatedAt: new Date().toISOString(),
+          };
+
+          await this.evaluateLiveStrategyForEpic(epic, flipped, prevTrend, newTrend);
+        } catch (epicErr) {
+          epicErrors.push(
+            `${epic}: ${epicErr instanceof Error ? epicErr.message : 'sync error'}`,
+          );
+        }
       }
 
+      if (epicErrors.length > 0) {
+        this.errorMessage = epicErrors.join(' | ');
+      }
       this.lastSyncAt = new Date().toISOString();
     } catch (err) {
       this.errorMessage =
@@ -1187,17 +1326,58 @@ export class TradingEngine {
   ): Promise<void> {
     const cfg = this.configs[epic];
     if (!cfg.stEnabled || cfg.mode !== 'AUTO') return;
+    if (!this.globalAutoEnabled && !this.isAdminWorkspace) return;
 
     const market = this.markets[epic];
     const signalDir: TradeDirection = newTrend === 'BULLISH' ? 'BUY' : 'SELL';
     const nowIso = new Date().toISOString();
 
-    // Detect external close on broker while signal active
+    // On fresh live startup/switch with no lock in memory, bind to any existing same-direction
+    // Capital.com positions or working orders to avoid firing duplicate 2-leg entries.
+    if (!flipped && !this.signalLocks[epic]) {
+      const sameDirPositions = this.positions.filter(
+        (p) => p.epic === epic && p.direction === signalDir,
+      );
+      const sameDirOrders = this.orders.filter(
+        (o) => o.epic === epic && o.direction === signalDir,
+      );
+      if (sameDirPositions.length > 0 || sameDirOrders.length > 0) {
+        const leg1Pos = sameDirPositions.find((p) => p.tpLevel !== null);
+        const leg2Pos = sameDirPositions.find((p) => p.tpLevel === null);
+        const leg1Ord = sameDirOrders.find((o) => o.tpLevel !== null);
+        const leg2Ord = sameDirOrders.find((o) => o.tpLevel === null);
+
+        const hydratedLock: SignalLockState = {
+          direction: signalDir,
+          lockedAt: nowIso,
+          brickClose: market.lastBrickClose,
+          brickSize: market.brickSize,
+          leg1DealId: leg1Pos?.dealId ?? leg1Ord?.dealId ?? null,
+          leg2DealId: leg2Pos?.dealId ?? leg2Ord?.dealId ?? null,
+          leg1OrderType: leg1Pos ? 'MARKET' : leg1Ord ? 'LIMIT' : null,
+          leg1Filled: Boolean(leg1Pos),
+          leg2Filled: Boolean(leg2Pos),
+          leg1Level: leg1Pos?.entryLevel ?? leg1Ord?.level,
+          leg1Tp: leg1Pos?.tpLevel ?? leg1Ord?.tpLevel ?? undefined,
+          leg2Level: leg2Pos?.entryLevel ?? leg2Ord?.level,
+        };
+        this.signalLocks[epic] = hydratedLock;
+        market.signalLock = hydratedLock;
+        return;
+      }
+    }
+
+    // Strict once-per-trend lock: stay locked as long as ANY same-direction position
+    // or working order remains active on Capital.com. Only unlock on a genuine full close.
     const existingLock = this.signalLocks[epic];
     if (existingLock && !flipped) {
-      const hasAnyPos = this.positions.some((p) => p.epic === epic);
-      const hasAnyOrd = this.orders.some((o) => o.epic === epic);
-      if (!hasAnyPos && !hasAnyOrd) {
+      const hasSameDirPos = this.positions.some(
+        (p) => p.epic === epic && p.direction === existingLock.direction,
+      );
+      const hasSameDirOrd = this.orders.some(
+        (o) => o.epic === epic && o.direction === existingLock.direction,
+      );
+      if (!hasSameDirPos && !hasSameDirOrd) {
         this.signalLocks[epic] = null;
         market.signalLock = null;
         this.history.unshift({
@@ -1212,7 +1392,7 @@ export class TradingEngine {
           tpLevel: null,
           margin: 0,
           leverage: cfg.leverage,
-          note: 'Detected AUTO order closed externally on broker; unlocked re-entry for available signal.',
+          note: 'All same-direction positions and working orders closed externally on broker; unlocked re-entry.',
           timestamp: nowIso,
         });
       }
@@ -1304,7 +1484,10 @@ export class TradingEngine {
         level: leg1Level,
         profitLevel: leg1Tp,
       });
-      leg1Ref = res.dealReference;
+      leg1Ref = await this.capital.getDealConfirmation(
+        this.environment,
+        res.dealReference,
+      );
       this.history.unshift({
         id: uid('hist'),
         epic,
@@ -1328,7 +1511,10 @@ export class TradingEngine {
         size: leg1Size,
         profitLevel: leg1Tp,
       });
-      leg1Ref = res.dealReference;
+      leg1Ref = await this.capital.getDealConfirmation(
+        this.environment,
+        res.dealReference,
+      );
       leg1Type = 'MARKET';
       this.history.unshift({
         id: uid('hist'),
@@ -1359,7 +1545,10 @@ export class TradingEngine {
           profitLevel: null,
         },
       );
-      leg2Ref = res2.dealReference;
+      leg2Ref = await this.capital.getDealConfirmation(
+        this.environment,
+        res2.dealReference,
+      );
       this.history.unshift({
         id: uid('hist'),
         epic,
@@ -1389,6 +1578,9 @@ export class TradingEngine {
       leg1OrderType: leg1Type,
       leg1Filled: leg1Type === 'MARKET',
       leg2Filled: false,
+      leg1Level,
+      leg1Tp,
+      leg2Level,
     };
     market.signalLock = this.signalLocks[epic];
   }
@@ -1397,6 +1589,9 @@ export class TradingEngine {
     this.environment = env;
     this.cachedLiveAccount = null;
     this.errorMessage = null;
+    for (const epic of EPIC_LIST) {
+      this.hasInitializedLiveTrends[epic] = false;
+    }
     await this.syncWithBroker();
     return this.getSnapshot();
   }
@@ -1464,9 +1659,10 @@ export class TradingEngine {
 
     const market = this.markets[epic];
     const execPrice = direction === 'BUY' ? market.ask : market.bid;
+    const lotCeiling = this.getLotCeiling(cfg);
     const orderSize =
       size && size >= cfg.minSize
-        ? size
+        ? roundPrice(Math.min(size, lotCeiling), 4)
         : this.getEffectiveSize(cfg, 1, execPrice);
     const tpLevel =
       tpBricks && tpBricks > 0

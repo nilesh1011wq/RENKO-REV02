@@ -666,18 +666,19 @@ export default function App() {
                       {selectedEpic} Active 2-Leg Execution Blueprint (
                       {activeSignalDir})
                     </h2>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Live levels computed from Brick Close (
+                    <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
+                      Live levels from zero-aligned Brick Close (
                       {formatPrice(
                         activeMarket.lastBrickClose,
                         activeConfig.decimals,
                       )}
-                      ) and Brick Size (
+                      ) · Brick (
                       {formatPrice(
                         activeMarket.brickSize,
                         activeConfig.decimals,
                       )}
-                      )
+                      {' = 23h ATR(5) '}
+                      {formatPrice(activeMarket.atr5, activeConfig.decimals)} ÷ 5)
                     </p>
                   </div>
                   <div className="text-xs font-mono text-slate-600 tabular-nums">

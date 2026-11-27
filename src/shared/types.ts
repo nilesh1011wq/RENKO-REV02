@@ -65,6 +65,9 @@ export interface SignalLockState {
   brickSize: number;
   leg1DealId: string | null;
   leg2DealId: string | null;
+  leg1Level?: number;
+  leg1Tp?: number;
+  leg2Level?: number;
   leg1OrderType: 'LIMIT' | 'MARKET' | null;
   leg1Filled: boolean;
   leg2Filled: boolean;
@@ -80,6 +83,7 @@ export interface InstrumentMarketState {
   low24h: number;
   change: number;
   changePct: number;
+  atr5: number;
   brickSize: number;
   bricks: RenkoBrick[];
   supertrend: SupertrendPoint[];

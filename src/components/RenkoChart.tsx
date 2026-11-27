@@ -241,7 +241,14 @@ export function RenkoChart({
           <div className="mt-1 flex items-center gap-2 text-xs text-slate-400 font-mono tabular-nums flex-wrap">
             <span>Renko (23h ATR5/5)</span>
             <span aria-hidden="true">·</span>
-            <span>Brick: {formatPrice(market.brickSize, decimals)}</span>
+            <span
+              title={`23h ATR(5): ${formatPrice(market.atr5, decimals)} ÷ 5 = ${formatPrice(market.brickSize, decimals)}`}
+            >
+              Brick: {formatPrice(market.brickSize, decimals)}{' '}
+              <span className="text-slate-500">
+                (23h ATR(5): {formatPrice(market.atr5, decimals)} ÷ 5)
+              </span>
+            </span>
             <span aria-hidden="true">·</span>
             <span
               className={`font-semibold ${

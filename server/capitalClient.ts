@@ -313,7 +313,8 @@ export class CapitalApiClient {
           close,
         };
       })
-      .filter((c) => c.close > 0);
+      .filter((c) => c.close > 0)
+      .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   }
 
   async getPositions(env: BrokerEnvironment): Promise<CapitalRawPosition[]> {
@@ -450,6 +451,25 @@ export class CapitalApiClient {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  }
+
+  async getDealConfirmation(
+    env: BrokerEnvironment,
+    dealReference: string,
+  ): Promise<string> {
+    try {
+      const data = await this.request<{
+        dealId?: string;
+        affectedDeals?: Array<{ dealId?: string }>;
+      }>(env, `/api/v1/confirms/${encodeURIComponent(dealReference)}`);
+      return (
+        data.dealId ||
+        data.affectedDeals?.find((d) => Boolean(d.dealId))?.dealId ||
+        dealReference
+      );
+    } catch {
+      return dealReference;
+    }
   }
 
   async closePosition(env: BrokerEnvironment, dealId: string): Promise<void> {
